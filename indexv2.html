@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pro Player with 10-Band EQ</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <style>
+        :root { --primary: #1db954; --bg: #121212; --card: #181818; --text: #ffffff; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Sidebar */
+        .sidebar { width: 300px; background: #000; display: flex; flex-direction: column; border-right: 1px solid #282828; }
+        #playlist { list-style: none; padding: 0; overflow-y: auto; flex-grow: 1; }
+        #playlist li { padding: 10px 20px; cursor: pointer; border-bottom: 1px solid #222; font-size: 12px; }
+        #playlist li.active { color: var(--primary); background: #1a1a1a; }
+
+        /* Main Area */
+        .main { flex-grow: 1; display: flex; flex-direction: column; padding: 20px; overflow-y: auto; align-items: center; }
+        .player-card { background: var(--card); padding: 25px; border-radius: 15px; width: 100%; max-width: 600px; text-align: center; margin-bottom: 20px; }
+        
+        .playback-controls { display: flex; align-items: center; justify-content: center; gap: 15px; margin: 15px 0; }
+        .btn-play { background: white; color: black; width: 45px; height: 45px; border-radius: 50%; border:none; cursor:pointer; font-size: 18px; }
+
+        /* Equalizer Styles */
+        .eq-container { display: flex; justify-content: space-between; background: #111; padding: 20px; border-radius: 10px; width: 100%; max-width: 600px; gap: 10px; }
+        .eq-band { display: flex; flex-direction: column; align-items: center; flex: 1; }
+        .eq-band input[type=range] { appearance: slider-vertical; width: 20px; height: 150px; background: #333; }
+        .eq-label { font-size: 9px; margin-top: 8px; color: #888; }
+
+        .effects-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin: 15px 0; }
+        .btn-effect { font-size: 10px; padding: 5px; background: #333; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .btn-effect.active { background: var(--primary); }
+        .btn-upload { background: var(--primary); color: white; margin: 10px; padding: 8px; border-radius: 5px; border:none; cursor:pointer; font-size: 12px;}
+    </style>
+</head>
+<body>
+
+    <div class="sidebar">
+        <h3 style="padding:20px; margin:0;">Library</h3>
+        <a href="index.html">old version</a>
+      <input type="file" id="folderInput" webkitdirectory style="display:none">
+        <button class="btn-upload" onclick="document.getElementById('folderInput').click()">📁 Pilih Folder</button>
+        <ul id="playlist"></ul>
+    </div>
+
+    <div class="main">
+        <div class="player-card">
+            <h3 id="songTitle">Silakan Pilih Folder</h3>
+            <div class="playback-controls">
+                <button onclick="playPrev()" style="background:none; border:none; color:white; font-size:20px; cursor:pointer;">⏮</button>
+                <button class="btn-play" id="masterPlay" onclick="togglePlay()">▶</button>
+                <button onclick="playNext()" style="background:none; border:none; color:white; font-size:20px; cursor:pointer;">⏭</button>
+            </div>
+
+            <div class="effects-grid">
+                <button class="btn-effect active" onclick="setEffect('normal', this)">Normal</button>
+                <button class="btn-effect" onclick="setEffect('female', this)">👩 Female</button>
+                <button class="btn-effect" onclick="setEffect('child', this)">👶 Child</button>
+                <button class="btn-effect" onclick="setEffect('spongebob', this)">🧽 Sponge</button>
+                <button class="btn-effect" onclick="setEffect('monster', this)">👹 Monster</button>
+                <button class="btn-effect" onclick="setEffect('robot', this)">🤖 Robot</button>
+            </div>
+        </div>
+
+        <h4 style="margin: 10px 0;">10-Band Graphic Equalizer</h4>
+        <div class="eq-container" id="eqControls">
+            </div>
+        <p style="font-size: 10px; color: #555; margin-top: 10px;">Range: -12dB to +12dB</p>
+    </div>
+
+    <script>
+        // --- 1. SETUP AUDIO ENGINE & EQ ---
+        const frequencies = [32, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+        const eqNodes = [];
+        const limiter = new Tone.Limiter(-1).toDestination();
+
+        // Buat filter untuk setiap band frekuensi
+        frequencies.forEach((freq, i) => {
+            const filter = new Tone.Filter({
+                frequency: freq,
+                type: "peaking",
+                Q: 1.4, // Lebar band
+                gain: 0
+            });
+            eqNodes.push(filter);
+        });
+
+        // Hubungkan EQ Nodes secara berantai (Serial)
+        // input -> eq[0] -> eq[1] ... -> eq[9] -> limiter
+        for (let i = 0; i < eqNodes.length - 1; i++) {
+            eqNodes[i].connect(eqNodes[i+1]);
+        }
+        eqNodes[eqNodes.length - 1].connect(limiter);
+
+        const vibrato = new Tone.Vibrato(0, 0).connect(eqNodes[0]);
+        const pitchShift = new Tone.PitchShift({ pitch: 0, windowSize: 0.1 }).connect(vibrato);
+        const crusher = new Tone.BitCrusher({ bits: 4, wet: 0 }).connect(eqNodes[0]);
+        const fxFilter = new Tone.Filter(20000, "lowpass").connect(eqNodes[0]); // Filter untuk efek karakter
+        
+        let player = new Tone.Player().connect(pitchShift);
+        
+        let songFiles = [];
+        let currentIndex = -1;
+        let isChangingSong = false;
+
+        // --- 2. GENERATE EQ UI ---
+        const eqContainer = document.getElementById('eqControls');
+        frequencies.forEach((freq, i) => {
+            const label = freq >= 1000 ? (freq/1000) + "k" : freq;
+            const div = document.createElement('div');
+            div.className = 'eq-band';
+            div.innerHTML = `
+                <input type="range" min="-12" max="12" step="1" value="0" 
+                       oninput="updateEQ(${i}, this.value)">
+                <span class="eq-label">${label}Hz</span>
+            `;
+            eqContainer.appendChild(div);
+        });
+
+        function updateEQ(index, val) {
+            eqNodes[index].gain.value = val;
+        }
+
+        // --- 3. LOGIKA PLAYER (Fix Next/Auto-play) ---
+        player.onstop = () => {
+            if (!isChangingSong && player.state === "stopped") {
+                playNext();
+            }
+        };
+
+        document.getElementById('folderInput').addEventListener('change', (e) => {
+            const files = Array.from(e.target.files).filter(f => f.type.startsWith('audio/'));
+            if (files.length === 0) return;
+            songFiles = files;
+            renderPlaylist();
+        });
+
+        function renderPlaylist() {
+            const list = document.getElementById('playlist');
+            list.innerHTML = '';
+            songFiles.forEach((file, i) => {
+                const li = document.createElement('li');
+                li.innerText = file.name;
+                li.id = `song-${i}`;
+                li.onclick = () => playSong(i);
+                list.appendChild(li);
+            });
+        }
+
+        async function playSong(index) {
+            if (index < 0 || index >= songFiles.length) return;
+            isChangingSong = true;
+            player.stop();
+            currentIndex = index;
+            await Tone.start();
+            const url = URL.createObjectURL(songFiles[index]);
+            document.getElementById('songTitle').innerText = songFiles[index].name;
+            updateUI();
+            player.load(url).then(() => {
+                isChangingSong = false;
+                player.start();
+                document.getElementById('masterPlay').innerText = "⏸";
+            });
+        }
+
+        function togglePlay() {
+            if (player.state === "started") { player.pause(); document.getElementById('masterPlay').innerText = "▶"; }
+            else { player.play(); document.getElementById('masterPlay').innerText = "⏸"; }
+        }
+
+        function playNext() { playSong((currentIndex + 1) % songFiles.length); }
+        function playPrev() { playSong((currentIndex - 1 + songFiles.length) % songFiles.length); }
+
+        function updateUI() {
+            document.querySelectorAll('#playlist li').forEach((li, i) => {
+                li.className = (i === currentIndex) ? 'active' : '';
+            });
+        }
+
+        // --- 4. EFEK KARAKTER ---
+        function setEffect(type, btn) {
+            pitchShift.pitch = 0; vibrato.wet.value = 0; crusher.wet.value = 0; 
+            fxFilter.frequency.value = 20000; player.playbackRate = 1.0;
+
+            if (type === 'female') { pitchShift.pitch = 5.5; pitchShift.windowSize = 0.15; }
+            else if (type === 'child') { pitchShift.pitch = 8; pitchShift.windowSize = 0.05; }
+            else if (type === 'spongebob') { pitchShift.pitch = 6.5; vibrato.wet.value = 1; vibrato.frequency.value = 14; vibrato.depth.value = 0.4; }
+            else if (type === 'monster') { pitchShift.pitch = -7; fxFilter.frequency.value = 1000; }
+            else if (type === 'robot') { vibrato.wet.value = 1; vibrato.frequency.value = 50; vibrato.depth.value = 1; }
+
+            document.querySelectorAll('.btn-effect').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        }
+    </script>
+</body>
+</html>
